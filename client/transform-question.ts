@@ -1,10 +1,11 @@
-import type { PluginTimelineTransformerContribution } from "@getpaseo/plugin/client";
+import type { PluginTimelineTransformResult } from "@getpaseo/plugin";
+import type { ToolCallTimelineItem } from "@getpaseo/protocol/agent-types";
 import {
   ASK_QUESTION_TOOL_NAME,
   computeQuestionId,
-  GRILL_QUESTION_ITEM_KIND,
-  GRILL_QUESTION_ITEM_VERSION,
-  type GrillQuestionItemData,
+  GRILL_STUB_ITEM_KIND,
+  GRILL_STUB_ITEM_VERSION,
+  type GrillStubItemData,
 } from "../shared/grill";
 
 const TOOL_NAME_SUFFIXES = [
@@ -37,7 +38,6 @@ interface ExtractedFields {
   question: string;
   branch?: string;
   options: string[];
-  isMultiSelect: boolean;
 }
 
 function extractFromObject(obj: unknown): ExtractedFields | undefined {
@@ -65,18 +65,10 @@ function extractFromObject(obj: unknown): ExtractedFields | undefined {
     if (trimmedBranch.length > 0) branch = trimmedBranch;
   }
 
-  const rawMulti =
-    typeof parsed.is_multi_select === "boolean"
-      ? parsed.is_multi_select
-      : typeof parsed.isMultiSelect === "boolean"
-        ? parsed.isMultiSelect
-        : false;
-
   return {
     question,
     ...(branch !== undefined ? { branch } : {}),
     options,
-    isMultiSelect: rawMulti,
   };
 }
 
@@ -104,9 +96,14 @@ function extractFromOutput(output: unknown): ExtractedFields | undefined {
   return undefined;
 }
 
-type ToolCallTransform = PluginTimelineTransformerContribution<"tool_call">["transform"];
-
-export const transformQuestion: ToolCallTransform = ({ item }) => {
+export function transformQuestion({
+  item,
+  phase,
+}: {
+  item: ToolCallTimelineItem;
+  phase: "streaming" | "complete";
+}): PluginTimelineTransformResult | undefined {
+  void phase;
   try {
     if (!isAskQuestionToolName(item.name)) return undefined;
 
@@ -130,14 +127,12 @@ export const transformQuestion: ToolCallTransform = ({ item }) => {
       options: extracted.options,
     });
 
-    const data: GrillQuestionItemData = {
+    const data: GrillStubItemData = {
       questionId,
       ...(item.callId ? { callId: item.callId } : {}),
       ...(item.status ? { toolStatus: item.status } : {}),
       question: extracted.question,
       ...(extracted.branch !== undefined ? { branch: extracted.branch } : {}),
-      options: extracted.options,
-      isMultiSelect: extracted.isMultiSelect,
     };
 
     return {
@@ -145,8 +140,8 @@ export const transformQuestion: ToolCallTransform = ({ item }) => {
         {
           type: "plugin",
           id: item.callId || questionId,
-          kind: GRILL_QUESTION_ITEM_KIND,
-          version: GRILL_QUESTION_ITEM_VERSION,
+          kind: GRILL_STUB_ITEM_KIND,
+          version: GRILL_STUB_ITEM_VERSION,
           data,
         },
       ],
@@ -154,4 +149,4 @@ export const transformQuestion: ToolCallTransform = ({ item }) => {
   } catch {
     return undefined;
   }
-};
+}

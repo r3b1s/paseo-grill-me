@@ -1,13 +1,17 @@
 import type { PluginCleanup } from "@getpaseo/plugin";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { GrillQuestionCard } from "./client/question-card";
+import { GrillQuestionStub } from "./client/question-stub";
 import { GrillSettingsScreen } from "./client/settings-screen";
 import { transformQuestion } from "./client/transform-question";
 import { registerWorkspaceBadge } from "./client/workspace-badge";
 import {
-  GRILL_QUESTION_ITEM_KIND,
-  GRILL_QUESTION_ITEM_VERSION,
-  GrillQuestionItemSchema,
+  GRILL_CARD_ITEM_KIND,
+  GRILL_CARD_ITEM_VERSION,
+  GRILL_STUB_ITEM_KIND,
+  GRILL_STUB_ITEM_VERSION,
+  GrillCardItemSchema,
+  GrillStubItemSchema,
   startGrillRpc,
 } from "./shared/grill";
 
@@ -24,9 +28,18 @@ export default function contribute(client: PluginClientContext): PluginCleanup {
 
   cleanups.push(
     client.addTimelineRenderer({
-      kind: GRILL_QUESTION_ITEM_KIND,
-      version: GRILL_QUESTION_ITEM_VERSION,
-      schema: GrillQuestionItemSchema,
+      kind: GRILL_STUB_ITEM_KIND,
+      version: GRILL_STUB_ITEM_VERSION,
+      schema: GrillStubItemSchema,
+      Component: GrillQuestionStub,
+    }),
+  );
+
+  cleanups.push(
+    client.addTimelineRenderer({
+      kind: GRILL_CARD_ITEM_KIND,
+      version: GRILL_CARD_ITEM_VERSION,
+      schema: GrillCardItemSchema,
       Component: GrillQuestionCard,
     }),
   );

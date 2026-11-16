@@ -1,16 +1,13 @@
 import { useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type PluginTimelineItemProps, useRpc } from "@getpaseo/plugin/client";
 import { Icon, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import {
   answerGrillQuestionRpc,
-  getGrillStateRpc,
+  type GrillCardItemData,
   grillQueryKeys,
   parseOptionLabel,
-  readGrillState,
-  type GrillQuestionAnswer,
-  type GrillQuestionItemData,
 } from "../shared/grill";
 
 export function GrillQuestionCard({
@@ -18,48 +15,26 @@ export function GrillQuestionCard({
   item,
   theme,
   layout,
-}: PluginTimelineItemProps<GrillQuestionItemData>) {
-  const { questionId, toolStatus, question, branch, options, isMultiSelect } = item.data;
+}: PluginTimelineItemProps<GrillCardItemData>) {
+  const { cardId, questionId, question, branch, options, isMultiSelect, status, answer } =
+    item.data;
 
-  const getState = useRpc(getGrillStateRpc);
   const answerRpc = useRpc(answerGrillQuestionRpc);
   const queryClient = useQueryClient();
   const toast = useToast();
 
-  const [submitted, setSubmitted] = useState<GrillQuestionAnswer | null>(null);
+  const [submittedCardId, setSubmittedCardId] = useState<string | null>(null);
   const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
   const [otherSelected, setOtherSelected] = useState(false);
   const [customText, setCustomText] = useState("");
   const [note, setNote] = useState("");
 
-  const stateQuery = useQuery({
-    queryKey: grillQueryKeys.state(agentId),
-    queryFn: () => getState({ agentId }),
-    refetchInterval: (query) => {
-      if (submitted) return false;
-      const current = readGrillState(query.state.data);
-      if (current.answers[questionId]) return false;
-      // The agent moved on to another question: this card was superseded, stop polling.
-      const pending = current.pendingQuestion;
-      if (pending && pending.questionId !== questionId) return false;
-      return 2500;
-    },
-    staleTime: 1000,
-  });
-
-  const state = readGrillState(stateQuery.data);
-  const answer = submitted ?? state.answers[questionId];
+  const isSubmittedWaitingForDaemon = submittedCardId === cardId;
 
   const mutation = useMutation({
     mutationFn: answerRpc,
-    onSuccess: (_data, variables) => {
-      setSubmitted({
-        selectedOptions: variables.selectedOptions,
-        ...(variables.customText ? { customText: variables.customText } : {}),
-        ...(variables.note ? { note: variables.note } : {}),
-        answeredVia: "card",
-        answeredAt: new Date().toISOString(),
-      });
+    onSuccess: () => {
+      setSubmittedCardId(cardId);
       void queryClient.invalidateQueries({ queryKey: grillQueryKeys.state(agentId) });
       void queryClient.invalidateQueries({ queryKey: grillQueryKeys.pending() });
     },
@@ -81,17 +56,9 @@ export function GrillQuestionCard({
         padding: pad,
         gap,
       },
-      mutedCard: {
-        backgroundColor: theme.colors.surface1,
-        borderColor: theme.colors.border,
-        borderWidth: 1,
-        borderRadius: 8,
-        paddingHorizontal: pad,
-        paddingVertical: layout.compact ? 8 : 10,
-      },
-      mutedText: {
-        color: theme.colors.foregroundMuted,
-        fontSize: 13,
+      cardOpen: {
+        // Open questions get an accent border; locked cards keep the muted default.
+        borderColor: theme.colors.accent,
       },
       headerRow: {
         flexDirection: "row",
@@ -99,6 +66,12 @@ export function GrillQuestionCard({
         justifyContent: "space-between",
         flexWrap: "wrap",
         gap: 6,
+      },
+      headerLeft: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 6,
+        flexShrink: 1,
       },
       branchPill: {
         flexDirection: "row",
@@ -144,6 +117,20 @@ export function GrillQuestionCard({
         borderColor: theme.colors.accent,
         backgroundColor: theme.colors.surface2,
       },
+      lockedOptionRow: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+        paddingHorizontal: layout.compact ? 10 : 12,
+        paddingVertical: layout.compact ? 7 : 8,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+        backgroundColor: theme.colors.surface0,
+      },
+      lockedOptionRowUnchosen: {
+        opacity: 0.7,
+      },
       indicator: {
         color: theme.colors.foreground,
         fontSize: 15,
@@ -153,8 +140,19 @@ export function GrillQuestionCard({
       indicatorSelected: {
         color: theme.colors.accent,
       },
+      indicatorMuted: {
+        color: theme.colors.foregroundMuted,
+        fontSize: 15,
+        width: 18,
+        textAlign: "center",
+      },
       optionLabel: {
         color: theme.colors.foreground,
+        fontSize: 14,
+        flex: 1,
+      },
+      optionLabelMuted: {
+        color: theme.colors.foregroundMuted,
         fontSize: 14,
         flex: 1,
       },
@@ -199,7 +197,7 @@ export function GrillQuestionCard({
         color: theme.colors.statusDanger,
         fontSize: 13,
       },
-      answeredBadge: {
+      statusBadge: {
         flexDirection: "row",
         alignItems: "center",
         gap: 4,
@@ -209,71 +207,126 @@ export function GrillQuestionCard({
         fontSize: 12,
         fontWeight: "600",
       },
-      summaryBody: {
+      skippedBadgeText: {
+        color: theme.colors.foregroundMuted,
+        fontSize: 12,
+        fontWeight: "500",
+      },
+      readOnlyMeta: {
         gap: 4,
       },
-      summaryItem: {
+      readOnlyLabel: {
+        color: theme.colors.foregroundMuted,
+        fontSize: 13,
+      },
+      readOnlyValue: {
         color: theme.colors.foreground,
         fontSize: 13,
       },
-      summaryMeta: {
-        color: theme.colors.foregroundMuted,
+      composerQuote: {
+        color: theme.colors.foreground,
         fontSize: 13,
+        fontStyle: "italic",
       },
     });
   }, [theme, layout.compact]);
 
-  if ((toolStatus === "failed" || toolStatus === "canceled") && !answer) {
-    return (
-      <View style={styles.mutedCard}>
-        <Text style={styles.mutedText}>
-          Question could not be presented (tool call {toolStatus}).
-        </Text>
-      </View>
-    );
-  }
-
-  if (answer) {
-    const cleanSelections = answer.selectedOptions.map((opt) => parseOptionLabel(opt).label);
-    const hasSelections = cleanSelections.length > 0;
-    const hasCustom = Boolean(answer.customText && answer.customText.trim().length > 0);
-    const hasNote = Boolean(answer.note && answer.note.trim().length > 0);
+  if (status === "answered" || status === "superseded") {
+    const isSuperseded = status === "superseded";
+    const chosenSet = new Set(isSuperseded ? [] : answer?.selectedOptions ?? []);
+    const custom = answer?.customText?.trim();
+    const noteText = answer?.note?.trim();
+    const composerQuote = answer?.composerText?.trim();
 
     return (
       <View style={styles.card}>
         <View style={styles.headerRow}>
-          {branch ? (
-            <View style={styles.branchPill}>
-              <Icon name="GitBranch" size={12} color={theme.colors.foregroundMuted} />
-              <Text style={styles.branchText}>{branch}</Text>
+          <View style={styles.headerLeft}>
+            <Icon name="Lock" size={13} color={theme.colors.foregroundMuted} />
+            {branch ? (
+              <View style={styles.branchPill}>
+                <Icon name="GitBranch" size={12} color={theme.colors.foregroundMuted} />
+                <Text style={styles.branchText}>{branch}</Text>
+              </View>
+            ) : null}
+          </View>
+
+          {isSuperseded ? (
+            <View style={styles.statusBadge}>
+              <Icon name="SkipForward" size={14} color={theme.colors.foregroundMuted} />
+              <Text style={styles.skippedBadgeText}>Skipped</Text>
             </View>
           ) : (
-            <View />
+            <View style={styles.statusBadge}>
+              <Icon name="Check" size={14} color={theme.colors.statusSuccess} />
+              <Text style={styles.answeredBadgeText}>Answered</Text>
+            </View>
           )}
-          <View style={styles.answeredBadge}>
-            <Icon name="Check" size={14} color={theme.colors.statusSuccess} />
-            <Text style={styles.answeredBadgeText}>Answered</Text>
-          </View>
         </View>
 
         <Text style={styles.questionText}>{question}</Text>
 
-        <View style={styles.summaryBody}>
-          {hasSelections
-            ? cleanSelections.map((label, idx) => (
-                <Text key={`${idx}-${label}`} style={styles.summaryItem}>
-                  • {label}
+        {isSuperseded ? (
+          <Text style={styles.readOnlyLabel}>Superseded by a newer question</Text>
+        ) : null}
+
+        <View style={styles.optionsList}>
+          {options.map((option) => {
+            const isChosen = chosenSet.has(option);
+            const { label, recommended } = parseOptionLabel(option);
+            const indicator = isMultiSelect
+              ? isChosen
+                ? "☑"
+                : "☐"
+              : isChosen
+                ? "●"
+                : "○";
+
+            return (
+              <View
+                key={option}
+                style={[
+                  styles.lockedOptionRow,
+                  !isChosen && styles.lockedOptionRowUnchosen,
+                ]}
+              >
+                <Text style={isChosen ? styles.indicator : styles.indicatorMuted}>
+                  {indicator}
                 </Text>
-              ))
-            : null}
-          {hasCustom ? (
-            <Text style={styles.summaryItem}>• Other: {answer.customText}</Text>
-          ) : null}
-          {!hasSelections && !hasCustom && answer.answeredVia === "composer" ? (
-            <Text style={styles.summaryMeta}>Answered in chat</Text>
-          ) : null}
-          {hasNote ? <Text style={styles.summaryMeta}>Note: {answer.note}</Text> : null}
+                <Text style={isChosen ? styles.optionLabel : styles.optionLabelMuted}>
+                  {label}
+                </Text>
+                {recommended ? (
+                  <View style={styles.recommendedPill}>
+                    <Text style={styles.recommendedText}>Recommended</Text>
+                  </View>
+                ) : null}
+                {isChosen ? (
+                  <Icon name="Check" size={14} color={theme.colors.statusSuccess} />
+                ) : null}
+              </View>
+            );
+          })}
         </View>
+
+        {!isSuperseded && (custom || noteText || answer?.answeredVia === "composer") ? (
+          <View style={styles.readOnlyMeta}>
+            {custom ? (
+              <Text style={styles.readOnlyValue}>Other: {custom}</Text>
+            ) : null}
+            {noteText ? (
+              <Text style={styles.readOnlyValue}>Note: {noteText}</Text>
+            ) : null}
+            {answer?.answeredVia === "composer" ? (
+              <View style={{ gap: 2 }}>
+                <Text style={styles.readOnlyLabel}>Answered in chat:</Text>
+                {composerQuote ? (
+                  <Text style={styles.composerQuote}>{composerQuote}</Text>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
+        ) : null}
       </View>
     );
   }
@@ -281,7 +334,7 @@ export function GrillQuestionCard({
   function toggleOption(option: string) {
     if (isMultiSelect) {
       setSelectedOptions((prev) =>
-        prev.includes(option) ? prev.filter((item) => item !== option) : [...prev, option],
+        prev.includes(option) ? prev.filter((entry) => entry !== option) : [...prev, option],
       );
     } else {
       setSelectedOptions([option]);
@@ -302,9 +355,11 @@ export function GrillQuestionCard({
   const trimmedNote = note.trim();
   const canSubmit =
     selectedOptions.length > 0 || (otherSelected && trimmedCustom.length > 0);
+  const submitDisabled =
+    !canSubmit || mutation.isPending || isSubmittedWaitingForDaemon;
 
   function handleSubmit() {
-    if (!canSubmit || mutation.isPending) return;
+    if (submitDisabled) return;
     mutation.mutate({
       agentId,
       questionId,
@@ -317,7 +372,7 @@ export function GrillQuestionCard({
   }
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, styles.cardOpen]}>
       <View style={styles.headerRow}>
         {branch ? (
           <View style={styles.branchPill}>
@@ -387,7 +442,7 @@ export function GrillQuestionCard({
           onChangeText={setCustomText}
           placeholder="Enter your custom answer…"
           placeholderTextColor={theme.colors.foregroundMuted}
-          editable={!mutation.isPending}
+          editable={!mutation.isPending && !isSubmittedWaitingForDaemon}
         />
       ) : null}
 
@@ -397,7 +452,7 @@ export function GrillQuestionCard({
         onChangeText={setNote}
         placeholder="Add a note or context (optional)…"
         placeholderTextColor={theme.colors.foregroundMuted}
-        editable={!mutation.isPending}
+        editable={!mutation.isPending && !isSubmittedWaitingForDaemon}
       />
 
       {mutation.error ? (
@@ -410,16 +465,15 @@ export function GrillQuestionCard({
 
       <Pressable
         accessibilityRole="button"
-        accessibilityState={{ disabled: !canSubmit || mutation.isPending }}
-        disabled={!canSubmit || mutation.isPending}
+        accessibilityState={{ disabled: submitDisabled }}
+        disabled={submitDisabled}
         onPress={handleSubmit}
-        style={[
-          styles.submitButton,
-          (!canSubmit || mutation.isPending) && styles.submitButtonDisabled,
-        ]}
+        style={[styles.submitButton, submitDisabled && styles.submitButtonDisabled]}
       >
         <Text style={styles.submitButtonText}>
-          {mutation.isPending ? "Submitting…" : "Submit Answer"}
+          {mutation.isPending || isSubmittedWaitingForDaemon
+            ? "Submitting…"
+            : "Submit Answer"}
         </Text>
       </Pressable>
     </View>

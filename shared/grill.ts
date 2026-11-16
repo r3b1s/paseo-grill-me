@@ -6,8 +6,16 @@ import { z } from "zod";
 // ---------------------------------------------------------------------------
 
 export const ASK_QUESTION_TOOL_NAME = "paseo_ask_question";
-export const GRILL_QUESTION_ITEM_KIND = "grill-question";
-export const GRILL_QUESTION_ITEM_VERSION = 1;
+/** Compact stub that replaces the original `paseo_ask_question` tool-call row. */
+export const GRILL_STUB_ITEM_KIND = "grill-question-stub";
+export const GRILL_STUB_ITEM_VERSION = 1;
+/** Standalone question card the daemon appends at the end of the agent timeline. */
+export const GRILL_CARD_ITEM_KIND = "grill-question-card";
+export const GRILL_CARD_ITEM_VERSION = 1;
+/** Longest quote of a composer reply stored on a locked card. */
+export const COMPOSER_QUOTE_MAX_CHARS = 300;
+export const APPEND_FAILED_FOLLOW_UP =
+  "The question card could not be shown; please ask that question in plain text.";
 export const RECOMMENDED_PREFIX = "(Recommended) ";
 
 export const DEFAULT_GRILL_PROMPT_TEMPLATE = `<GRILL_ME>
@@ -75,7 +83,10 @@ export const GrillQuestionAnswerSchema = z.object({
   selectedOptions: z.array(z.string()),
   customText: z.string().optional(),
   note: z.string().optional(),
-  answeredVia: z.enum(["card", "composer"]),
+  /** `superseded`: the agent asked a newer question before this one was answered. */
+  answeredVia: z.enum(["card", "composer", "superseded"]),
+  /** The user's composer reply, truncated to COMPOSER_QUOTE_MAX_CHARS. */
+  composerText: z.string().optional(),
   answeredAt: z.string(),
 });
 
@@ -88,6 +99,10 @@ export const GrillPendingQuestionSchema = z.object({
   options: z.array(z.string()),
   isMultiSelect: z.boolean(),
   askedAt: z.string(),
+  /** Timeline row id of this question's card; unique per ask, even for repeated questions. */
+  cardId: z.string().default(""),
+  /** True once the card row was appended to the agent timeline. */
+  cardAppended: z.boolean().default(false),
 });
 
 export type GrillPendingQuestion = z.output<typeof GrillPendingQuestionSchema>;
@@ -284,17 +299,37 @@ export const grillQueryKeys = {
 };
 
 // ---------------------------------------------------------------------------
-// Timeline item data (client transformer output / renderer schema)
+// Timeline item data
 // ---------------------------------------------------------------------------
 
-export const GrillQuestionItemSchema = z.object({
+/** Stub replacing the tool-call row (client transformer output / renderer schema). */
+export const GrillStubItemSchema = z.object({
   questionId: z.string(),
   callId: z.string().optional(),
   toolStatus: z.string().optional(),
   question: z.string(),
   branch: z.string().optional(),
-  options: z.array(z.string()),
-  isMultiSelect: z.boolean(),
 });
 
-export type GrillQuestionItemData = z.output<typeof GrillQuestionItemSchema>;
+export type GrillStubItemData = z.output<typeof GrillStubItemSchema>;
+
+/** The appended card. The daemon re-appends it with the same id whenever its status changes. */
+export const GrillCardItemSchema = z.object({
+  cardId: z.string(),
+  questionId: z.string(),
+  question: z.string(),
+  branch: z.string().optional(),
+  options: z.array(z.string()),
+  isMultiSelect: z.boolean(),
+  status: z.enum(["pending", "answered", "superseded"]),
+  answer: GrillQuestionAnswerSchema.optional(),
+});
+
+export type GrillCardItemData = z.output<typeof GrillCardItemSchema>;
+
+/** Truncates a composer reply for the locked card quote. */
+export function truncateComposerQuote(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= COMPOSER_QUOTE_MAX_CHARS) return trimmed;
+  return `${trimmed.slice(0, COMPOSER_QUOTE_MAX_CHARS - 1).trimEnd()}\u2026`;
+}
