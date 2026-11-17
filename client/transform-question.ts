@@ -38,6 +38,7 @@ interface ExtractedFields {
   question: string;
   branch?: string;
   options: string[];
+  isMultiSelect: boolean;
 }
 
 function extractFromObject(obj: unknown): ExtractedFields | undefined {
@@ -69,6 +70,7 @@ function extractFromObject(obj: unknown): ExtractedFields | undefined {
     question,
     ...(branch !== undefined ? { branch } : {}),
     options,
+    isMultiSelect: parsed.is_multi_select === true,
   };
 }
 
@@ -133,6 +135,8 @@ export function transformQuestion({
       ...(item.status ? { toolStatus: item.status } : {}),
       question: extracted.question,
       ...(extracted.branch !== undefined ? { branch: extracted.branch } : {}),
+      options: extracted.options,
+      isMultiSelect: extracted.isMultiSelect,
     };
 
     return {

@@ -1,1 +1,6 @@
 node_modules/
+
+# harness-specific artifacts
+.claude
+.codex
+.commandcode

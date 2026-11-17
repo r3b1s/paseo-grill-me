@@ -1,14 +1,57 @@
 import { useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import type { StyleProp, TextStyle } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type PluginTimelineItemProps, useRpc } from "@getpaseo/plugin/client";
 import { Icon, TextInput, useToast } from "@getpaseo/plugin/client/ui";
+import { LockedQuestionCard } from "./locked-question-card";
 import {
   answerGrillQuestionRpc,
   type GrillCardItemData,
   grillQueryKeys,
   parseOptionLabel,
 } from "../shared/grill";
+
+const INPUT_MIN_HEIGHT = 38;
+const INPUT_MAX_HEIGHT = 140;
+
+interface AutoGrowInputProps {
+  value: string;
+  onChangeText: (text: string) => void;
+  placeholder: string;
+  placeholderTextColor: string;
+  editable: boolean;
+  style: StyleProp<TextStyle>;
+}
+
+/** Multiline input that wraps, accepts newlines, grows with content, and scrolls past a cap. */
+function AutoGrowInput({
+  value,
+  onChangeText,
+  placeholder,
+  placeholderTextColor,
+  editable,
+  style,
+}: AutoGrowInputProps) {
+  const [height, setHeight] = useState(INPUT_MIN_HEIGHT);
+  return (
+    <TextInput
+      multiline
+      value={value}
+      onChangeText={onChangeText}
+      placeholder={placeholder}
+      placeholderTextColor={placeholderTextColor}
+      editable={editable}
+      onContentSizeChange={(event) => {
+        const contentHeight = event.nativeEvent.contentSize?.height;
+        if (typeof contentHeight === "number" && Number.isFinite(contentHeight)) {
+          setHeight(Math.min(Math.max(contentHeight, INPUT_MIN_HEIGHT), INPUT_MAX_HEIGHT));
+        }
+      }}
+      style={[style, { height, textAlignVertical: "top" as const }]}
+    />
+  );
+}
 
 export function GrillQuestionCard({
   agentId,
@@ -67,12 +110,6 @@ export function GrillQuestionCard({
         flexWrap: "wrap",
         gap: 6,
       },
-      headerLeft: {
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 6,
-        flexShrink: 1,
-      },
       branchPill: {
         flexDirection: "row",
         alignItems: "center",
@@ -117,20 +154,6 @@ export function GrillQuestionCard({
         borderColor: theme.colors.accent,
         backgroundColor: theme.colors.surface2,
       },
-      lockedOptionRow: {
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 8,
-        paddingHorizontal: layout.compact ? 10 : 12,
-        paddingVertical: layout.compact ? 7 : 8,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface0,
-      },
-      lockedOptionRowUnchosen: {
-        opacity: 0.7,
-      },
       indicator: {
         color: theme.colors.foreground,
         fontSize: 15,
@@ -140,19 +163,13 @@ export function GrillQuestionCard({
       indicatorSelected: {
         color: theme.colors.accent,
       },
-      indicatorMuted: {
+      optionNumber: {
         color: theme.colors.foregroundMuted,
-        fontSize: 15,
-        width: 18,
-        textAlign: "center",
+        fontSize: 13,
+        fontVariant: ["tabular-nums"],
       },
       optionLabel: {
         color: theme.colors.foreground,
-        fontSize: 14,
-        flex: 1,
-      },
-      optionLabelMuted: {
-        color: theme.colors.foregroundMuted,
         fontSize: 14,
         flex: 1,
       },
@@ -197,137 +214,21 @@ export function GrillQuestionCard({
         color: theme.colors.statusDanger,
         fontSize: 13,
       },
-      statusBadge: {
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 4,
-      },
-      answeredBadgeText: {
-        color: theme.colors.statusSuccess,
-        fontSize: 12,
-        fontWeight: "600",
-      },
-      skippedBadgeText: {
-        color: theme.colors.foregroundMuted,
-        fontSize: 12,
-        fontWeight: "500",
-      },
-      readOnlyMeta: {
-        gap: 4,
-      },
-      readOnlyLabel: {
-        color: theme.colors.foregroundMuted,
-        fontSize: 13,
-      },
-      readOnlyValue: {
-        color: theme.colors.foreground,
-        fontSize: 13,
-      },
-      composerQuote: {
-        color: theme.colors.foreground,
-        fontSize: 13,
-        fontStyle: "italic",
-      },
     });
   }, [theme, layout.compact]);
 
   if (status === "answered" || status === "superseded") {
-    const isSuperseded = status === "superseded";
-    const chosenSet = new Set(isSuperseded ? [] : answer?.selectedOptions ?? []);
-    const custom = answer?.customText?.trim();
-    const noteText = answer?.note?.trim();
-    const composerQuote = answer?.composerText?.trim();
-
     return (
-      <View style={styles.card}>
-        <View style={styles.headerRow}>
-          <View style={styles.headerLeft}>
-            <Icon name="Lock" size={13} color={theme.colors.foregroundMuted} />
-            {branch ? (
-              <View style={styles.branchPill}>
-                <Icon name="GitBranch" size={12} color={theme.colors.foregroundMuted} />
-                <Text style={styles.branchText}>{branch}</Text>
-              </View>
-            ) : null}
-          </View>
-
-          {isSuperseded ? (
-            <View style={styles.statusBadge}>
-              <Icon name="SkipForward" size={14} color={theme.colors.foregroundMuted} />
-              <Text style={styles.skippedBadgeText}>Skipped</Text>
-            </View>
-          ) : (
-            <View style={styles.statusBadge}>
-              <Icon name="Check" size={14} color={theme.colors.statusSuccess} />
-              <Text style={styles.answeredBadgeText}>Answered</Text>
-            </View>
-          )}
-        </View>
-
-        <Text style={styles.questionText}>{question}</Text>
-
-        {isSuperseded ? (
-          <Text style={styles.readOnlyLabel}>Superseded by a newer question</Text>
-        ) : null}
-
-        <View style={styles.optionsList}>
-          {options.map((option) => {
-            const isChosen = chosenSet.has(option);
-            const { label, recommended } = parseOptionLabel(option);
-            const indicator = isMultiSelect
-              ? isChosen
-                ? "☑"
-                : "☐"
-              : isChosen
-                ? "●"
-                : "○";
-
-            return (
-              <View
-                key={option}
-                style={[
-                  styles.lockedOptionRow,
-                  !isChosen && styles.lockedOptionRowUnchosen,
-                ]}
-              >
-                <Text style={isChosen ? styles.indicator : styles.indicatorMuted}>
-                  {indicator}
-                </Text>
-                <Text style={isChosen ? styles.optionLabel : styles.optionLabelMuted}>
-                  {label}
-                </Text>
-                {recommended ? (
-                  <View style={styles.recommendedPill}>
-                    <Text style={styles.recommendedText}>Recommended</Text>
-                  </View>
-                ) : null}
-                {isChosen ? (
-                  <Icon name="Check" size={14} color={theme.colors.statusSuccess} />
-                ) : null}
-              </View>
-            );
-          })}
-        </View>
-
-        {!isSuperseded && (custom || noteText || answer?.answeredVia === "composer") ? (
-          <View style={styles.readOnlyMeta}>
-            {custom ? (
-              <Text style={styles.readOnlyValue}>Other: {custom}</Text>
-            ) : null}
-            {noteText ? (
-              <Text style={styles.readOnlyValue}>Note: {noteText}</Text>
-            ) : null}
-            {answer?.answeredVia === "composer" ? (
-              <View style={{ gap: 2 }}>
-                <Text style={styles.readOnlyLabel}>Answered in chat:</Text>
-                {composerQuote ? (
-                  <Text style={styles.composerQuote}>{composerQuote}</Text>
-                ) : null}
-              </View>
-            ) : null}
-          </View>
-        ) : null}
-      </View>
+      <LockedQuestionCard
+        theme={theme}
+        layout={layout}
+        question={question}
+        branch={branch}
+        options={options}
+        isMultiSelect={isMultiSelect}
+        status={status}
+        answer={answer}
+      />
     );
   }
 
@@ -365,6 +266,7 @@ export function GrillQuestionCard({
       questionId,
       question,
       ...(branch ? { branch } : {}),
+      options,
       selectedOptions,
       ...(otherSelected && trimmedCustom.length > 0 ? { customText: trimmedCustom } : {}),
       ...(trimmedNote.length > 0 ? { note: trimmedNote } : {}),
@@ -390,7 +292,7 @@ export function GrillQuestionCard({
       <Text style={styles.questionText}>{question}</Text>
 
       <View style={styles.optionsList}>
-        {options.map((option) => {
+        {options.map((option, index) => {
           const isSelected = selectedOptions.includes(option);
           const { label, recommended } = parseOptionLabel(option);
           const indicator = isMultiSelect
@@ -412,6 +314,7 @@ export function GrillQuestionCard({
               <Text style={[styles.indicator, isSelected && styles.indicatorSelected]}>
                 {indicator}
               </Text>
+              <Text style={styles.optionNumber}>{index + 1}.</Text>
               <Text style={styles.optionLabel}>{label}</Text>
               {recommended ? (
                 <View style={styles.recommendedPill}>
@@ -436,7 +339,7 @@ export function GrillQuestionCard({
       </View>
 
       {otherSelected ? (
-        <TextInput
+        <AutoGrowInput
           style={styles.input}
           value={customText}
           onChangeText={setCustomText}
@@ -446,7 +349,7 @@ export function GrillQuestionCard({
         />
       ) : null}
 
-      <TextInput
+      <AutoGrowInput
         style={styles.input}
         value={note}
         onChangeText={setNote}

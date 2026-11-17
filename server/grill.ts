@@ -41,6 +41,8 @@ const MAX_ANSWERS_PER_AGENT = 200;
 const REAPPEND_DELAYS_MS = [1500, 5000, 15000];
 /** How many recent timeline rows to scan for the user's composer reply. */
 const COMPOSER_SCAN_LIMIT = 20;
+/** How many recent timeline rows to scan when checking which cards are still live. */
+const CARD_SCAN_LIMIT = 100;
 
 const PersistedAgentEntrySchema = z.object({
   workspaceId: z.string().nullable().default(null),
@@ -150,8 +152,13 @@ export function registerGrill(server: PluginServerContext): () => void {
   const settings = server.registerSettings(grillSettings);
   const paths = getStatePaths();
   const agentLocks = new Map<string, Promise<void>>();
-  /** Card ids appended (or re-appended) by this plugin process. */
-  const liveCards = new Set<string>();
+  /** Card ids appended (or re-appended) by this plugin process, per agent. */
+  const liveCardsByAgent = new Map<string, Set<string>>();
+  /**
+   * Card ids confirmed present in an agent's canonical timeline, checked once per process with a
+   * timeline scan. Cards appended later are covered by liveCardsByAgent.
+   */
+  const cardPresenceCache = new Map<string, Set<string>>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
   let disposed = false;
   let sweptAfterStart = false;
@@ -255,10 +262,48 @@ export function registerGrill(server: PluginServerContext): () => void {
   ): Promise<void> {
     try {
       await appendCard(paseo, agentId, data);
-      liveCards.add(data.cardId);
+      markCardLive(agentId, data.cardId);
     } catch (error) {
       console.error(`${LOG_PREFIX} Failed to update question card ${data.cardId}:`, error);
     }
+  }
+
+  function markCardLive(agentId: string, cardId: string): void {
+    let cards = liveCardsByAgent.get(agentId);
+    if (!cards) {
+      cards = new Set<string>();
+      liveCardsByAgent.set(agentId, cards);
+    }
+    cards.add(cardId);
+  }
+
+  /**
+   * Card ids currently present in the agent's canonical timeline: a one-time timeline scan per
+   * process unioned with the cards this process appended. After a daemon restart the scan finds
+   * no plugin rows, so locked cards fall back to rendering at their tool-call position.
+   */
+  async function resolveLiveCardIds(paseo: PaseoApi, agentId: string): Promise<string[]> {
+    let presence = cardPresenceCache.get(agentId);
+    if (!presence) {
+      presence = new Set<string>();
+      try {
+        const page = await paseo.agents
+          .ref(agentId)
+          .timeline.refetch({ direction: "tail", limit: CARD_SCAN_LIMIT });
+        for (const entry of page.entries) {
+          const item = entry.item;
+          if (item.type === "plugin" && item.kind === GRILL_CARD_ITEM_KIND) {
+            presence.add(item.id);
+          }
+        }
+      } catch (error) {
+        console.error(`${LOG_PREFIX} Failed to scan the timeline for live cards:`, error);
+      }
+      cardPresenceCache.set(agentId, presence);
+    }
+    const live = new Set(presence);
+    for (const cardId of liveCardsByAgent.get(agentId) ?? []) live.add(cardId);
+    return [...live];
   }
 
   /**
@@ -271,10 +316,10 @@ export function registerGrill(server: PluginServerContext): () => void {
       const data = await ensureLoaded();
       const pending = data.agents[agentId]?.state.pendingQuestion;
       if (!pending || !pending.cardAppended || !pending.cardId) return true;
-      if (liveCards.has(pending.cardId)) return true;
+      if (liveCardsByAgent.get(agentId)?.has(pending.cardId)) return true;
       try {
         await appendCard(paseo, agentId, buildCardData(pending, "pending"));
-        liveCards.add(pending.cardId);
+        markCardLive(agentId, pending.cardId);
         return true;
       } catch {
         return false;
@@ -314,7 +359,7 @@ export function registerGrill(server: PluginServerContext): () => void {
     name: ASK_QUESTION_TOOL_NAME,
     title: "Ask the user a question",
     description:
-      "Ask the user exactly one structured multiple-choice question. Put your recommended option first, prefixed with '(Recommended) '. Do not include an 'Other' option (the UI adds 'Other' automatically). End your turn immediately after calling this tool without repeating the question or options in plain text, and wait for the user's answer.",
+      "Ask the user exactly one structured multiple-choice question. Put your recommended option first, prefixed with '(Recommended) '. Do not include an 'Other' option (the UI adds 'Other' automatically). Options are numbered in the UI and the user may answer by number. End your turn immediately after calling this tool without repeating the question or options in plain text, and wait for the user's answer.",
     input: AskQuestionInputSchema,
     async execute(input, { agent, paseo }) {
       sweepAfterStart(paseo);
@@ -337,6 +382,7 @@ export function registerGrill(server: PluginServerContext): () => void {
             const skipped: GrillQuestionAnswer = {
               selectedOptions: [],
               answeredVia: "superseded",
+              ...(previous.cardAppended && previous.cardId ? { cardId: previous.cardId } : {}),
               answeredAt: now,
             };
             if (!answers[previous.questionId]) answers[previous.questionId] = skipped;
@@ -408,7 +454,7 @@ export function registerGrill(server: PluginServerContext): () => void {
         };
         try {
           await appendCard(paseo, agent.id, buildCardData(question, "pending"));
-          liveCards.add(question.cardId);
+          markCardLive(agent.id, question.cardId);
           writeEntry(
             data,
             agent.id,
@@ -455,6 +501,7 @@ export function registerGrill(server: PluginServerContext): () => void {
           selectedOptions: [],
           answeredVia: "composer",
           ...(composerText ? { composerText } : {}),
+          ...(pending.cardAppended && pending.cardId ? { cardId: pending.cardId } : {}),
           answeredAt: new Date().toISOString(),
         };
         writeEntry(
@@ -513,6 +560,7 @@ export function registerGrill(server: PluginServerContext): () => void {
         selectedOptions: input.selectedOptions,
         ...(customText ? { customText } : {}),
         ...(note ? { note } : {}),
+        ...(pending.cardAppended && pending.cardId ? { cardId: pending.cardId } : {}),
         answeredVia: "card",
         answeredAt: new Date().toISOString(),
       };
@@ -536,6 +584,7 @@ export function registerGrill(server: PluginServerContext): () => void {
       formatAnswerMessage({
         question: input.question,
         branch: input.branch,
+        options: input.options,
         selectedOptions: input.selectedOptions,
         customText,
         note,
@@ -544,9 +593,11 @@ export function registerGrill(server: PluginServerContext): () => void {
     return { ok: true };
   });
 
-  server.handle(getGrillStateRpc, async ({ agentId }) => {
+  server.handle(getGrillStateRpc, async ({ agentId }, { paseo }) => {
     const data = await ensureLoaded();
-    return data.agents[agentId]?.state ?? emptyGrillState();
+    const state = data.agents[agentId]?.state ?? emptyGrillState();
+    const liveCardIds = await resolveLiveCardIds(paseo, agentId);
+    return { state, liveCardIds };
   });
 
   server.handle(listPendingQuestionsRpc, async () => {

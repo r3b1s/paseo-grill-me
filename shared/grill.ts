@@ -18,6 +18,21 @@ export const APPEND_FAILED_FOLLOW_UP =
   "The question card could not be shown; please ask that question in plain text.";
 export const RECOMMENDED_PREFIX = "(Recommended) ";
 
+/** Prompt template shipped before option numbering; kept to migrate v1 settings documents. */
+export const DEFAULT_GRILL_PROMPT_TEMPLATE_V1 = `<GRILL_ME>
+The user has requested that you interview them about every aspect of their task until you have reached a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
+
+Guidelines:
+- Ask the questions one at a time. Never ask multiple questions in a single turn.
+- If a question can be answered by exploring the codebase, explore the codebase instead of asking the user.
+- Always use the \`paseo_ask_question\` tool to ask your question. Put your recommended option first, prefixed with \`(Recommended) \`, and include a short \`branch\` label showing which part of the design tree you are resolving (e.g. "Architecture > Storage").
+- After calling \`paseo_ask_question\`, end your turn immediately without repeating the question or options in plain text, and wait for the user's answer.
+- Once all branches of the design tree are resolved and you have reached a shared understanding, output a concise Design Summary of all resolved decisions in chat, and call \`paseo_ask_question\` one final time asking how the user wants to proceed:
+  1. "(Recommended) Proceed with implementation now"
+  2. "Save the design spec / plan to a Markdown file"
+  3. "Keep refining the design"
+</GRILL_ME>`;
+
 export const DEFAULT_GRILL_PROMPT_TEMPLATE = `<GRILL_ME>
 The user has requested that you interview them about every aspect of their task until you have reached a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
 
@@ -25,6 +40,7 @@ Guidelines:
 - Ask the questions one at a time. Never ask multiple questions in a single turn.
 - If a question can be answered by exploring the codebase, explore the codebase instead of asking the user.
 - Always use the \`paseo_ask_question\` tool to ask your question. Put your recommended option first, prefixed with \`(Recommended) \`, and include a short \`branch\` label showing which part of the design tree you are resolving (e.g. "Architecture > Storage").
+- The question card numbers your options, and the user may answer by number in chat (for example "2"); map a number back to the option in the order you provided it.
 - After calling \`paseo_ask_question\`, end your turn immediately without repeating the question or options in plain text, and wait for the user's answer.
 - Once all branches of the design tree are resolved and you have reached a shared understanding, output a concise Design Summary of all resolved decisions in chat, and call \`paseo_ask_question\` one final time asking how the user wants to proceed:
   1. "(Recommended) Proceed with implementation now"
@@ -61,7 +77,7 @@ export const AskQuestionInputSchema = z.object({
     .min(2)
     .max(10)
     .describe(
-      "Choices for the user, unnumbered and without an 'Other' option (the UI adds 'Other' automatically). Put your recommended option first, prefixed with '(Recommended) '.",
+      "Choices for the user, unnumbered and without an 'Other' option (the UI numbers the choices and adds 'Other' automatically). Put your recommended option first, prefixed with '(Recommended) '. The user may answer by number.",
     ),
   is_multi_select: z
     .boolean()
@@ -87,6 +103,8 @@ export const GrillQuestionAnswerSchema = z.object({
   answeredVia: z.enum(["card", "composer", "superseded"]),
   /** The user's composer reply, truncated to COMPOSER_QUOTE_MAX_CHARS. */
   composerText: z.string().optional(),
+  /** Timeline row id of the card shown for this question, when one was appended. */
+  cardId: z.string().optional(),
   answeredAt: z.string(),
 });
 
@@ -118,11 +136,19 @@ export function emptyGrillState(): GrillAgentState {
   return { pendingQuestion: null, answers: {} };
 }
 
-/** Parses an unknown value as agent state, returning an empty state when absent or invalid. */
-export function readGrillState(raw: unknown): GrillAgentState {
-  if (raw === undefined || raw === null) return emptyGrillState();
-  const parsed = GrillAgentStateSchema.safeParse(raw);
-  return parsed.success ? parsed.data : emptyGrillState();
+/** Response of `getGrillStateRpc`: the agent state plus card ids confirmed live in its timeline. */
+export const GrillStateResponseSchema = z.object({
+  state: GrillAgentStateSchema,
+  liveCardIds: z.array(z.string()).default([]),
+});
+
+export type GrillStateResponse = z.output<typeof GrillStateResponseSchema>;
+
+/** Parses an unknown value as a state response, falling back to empty state and no live cards. */
+export function readGrillStateResponse(raw: unknown): GrillStateResponse {
+  const parsed = GrillStateResponseSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  return { state: emptyGrillState(), liveCardIds: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -187,8 +213,22 @@ export type GrillSettingsValues = z.output<typeof GrillSettingsSchema>;
 export const grillSettings = defineSettings({
   id: "grill-me",
   scope: "host",
-  version: 1,
+  version: 2,
   schema: GrillSettingsSchema,
+  migrate(values, fromVersion) {
+    // v1 documents saved with the old default template adopt the new default; custom
+    // templates are left untouched.
+    if (fromVersion < 2) {
+      const candidate = values as { promptTemplate?: unknown };
+      if (
+        typeof candidate.promptTemplate === "string" &&
+        candidate.promptTemplate === DEFAULT_GRILL_PROMPT_TEMPLATE_V1
+      ) {
+        return { ...(values as Record<string, unknown>), promptTemplate: DEFAULT_GRILL_PROMPT_TEMPLATE };
+      }
+    }
+    return values;
+  },
 });
 
 export const DEFAULT_GRILL_SETTINGS: GrillSettingsValues = GrillSettingsSchema.parse({});
@@ -221,9 +261,21 @@ export function composeGrillPrompt(
 export interface GrillAnswerMessageInput {
   question: string;
   branch?: string;
+  /** Full option list, used to prefix each selection with its 1-based card number. */
+  options?: readonly string[];
   selectedOptions: readonly string[];
   customText?: string;
   note?: string;
+}
+
+/** Formats one selection as `<number> — <label>` when its position in the options is known. */
+function formatSelectedOption(
+  options: readonly string[] | undefined,
+  option: string,
+): string {
+  const label = parseOptionLabel(option).label;
+  const index = options?.indexOf(option) ?? -1;
+  return index >= 0 ? `${index + 1} — ${label}` : label;
 }
 
 /** Formats the user message sent to the agent after the card's Submit button. */
@@ -231,7 +283,9 @@ export function formatAnswerMessage(input: GrillAnswerMessageInput): string {
   const lines: string[] = [];
   const header = input.branch ? `[${input.branch}] ${input.question}` : input.question;
   lines.push(`Answer to: ${header}`);
-  const selected = input.selectedOptions.map((option) => parseOptionLabel(option).label);
+  const selected = input.selectedOptions.map((option) =>
+    formatSelectedOption(input.options, option),
+  );
   const custom = input.customText?.trim();
   if (selected.length === 1 && !custom) {
     lines.push(`Selected: ${selected[0]}`);
@@ -262,6 +316,8 @@ export const answerGrillQuestionRpc = defineRpc({
     questionId: z.string().min(1),
     question: z.string(),
     branch: z.string().optional(),
+    /** Full option list from the card, so the answer message can prefix numbers. */
+    options: z.array(z.string()).optional(),
     selectedOptions: z.array(z.string()),
     customText: z.string().optional(),
     note: z.string().optional(),
@@ -273,7 +329,7 @@ export const answerGrillQuestionRpc = defineRpc({
 export const getGrillStateRpc = defineRpc({
   name: "grill.state",
   input: z.object({ agentId: z.string().min(1) }),
-  output: GrillAgentStateSchema,
+  output: GrillStateResponseSchema,
 });
 
 /** Every agent on this host with an unanswered question (feeds the workspace badge). */
@@ -309,6 +365,9 @@ export const GrillStubItemSchema = z.object({
   toolStatus: z.string().optional(),
   question: z.string(),
   branch: z.string().optional(),
+  /** Options from the tool input, so the stub can render the locked card after a restart. */
+  options: z.array(z.string()).optional(),
+  isMultiSelect: z.boolean().optional(),
 });
 
 export type GrillStubItemData = z.output<typeof GrillStubItemSchema>;
